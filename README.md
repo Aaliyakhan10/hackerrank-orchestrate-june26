@@ -1,5 +1,12 @@
 # Multi-Modal Evidence Review System: Comprehensive Solution Architecture
 
+🏆 **Hackathon Results:**
+- **Rank:** #317 out of 1,773 (Top 18%)
+- **Final Score:** 56.0 / 100
+- **Code Score:** 20.1 / 30
+- **AI Judge Score:** 16.5 / 30
+
+
 ## 1. System Overview
 
 This repository implements a highly deterministic, multi-agent pipeline designed to verify damage claims by cross-referencing user claim conversations, historical user data, and submitted images. 
