@@ -1,161 +1,113 @@
-# HackerRank Orchestrate
+# Multi-Modal Evidence Review System: Comprehensive Solution Architecture
 
-Starter repository for the **HackerRank Orchestrate** 24-hour hackathon.
+## 1. System Overview
 
-Build a system that verifies visual evidence for damage claims across three object types: **cars**, **laptops**, and **packages**.
+This repository implements a highly deterministic, multi-agent pipeline designed to verify damage claims by cross-referencing user claim conversations, historical user data, and submitted images. 
 
-Your system will receive claim conversations, one or more submitted images, user claim history, and minimum evidence requirements. It must decide whether the submitted images support the claim, contradict it, or do not provide enough information.
+To resolve the hallucination, schema instability, and inconsistent decision-making inherent to pure LLM-based autonomous agents, this architecture enforces a **Judge-Grade Python Rule Engine**. In this paradigm, Large Language Models (LLMs) and Vision-Language Models (VLMs) act exclusively as *Perception and Extraction* layers. They parse unstructured text and images into strict Pydantic JSON objects. These objects are then fed into deterministic Python code which applies a strict hierarchy of gates to make the final claim decision.
 
-Read [`problem_statement.md`](./problem_statement.md) for the full task spec, input/output schema, and allowed values.
-
----
-
-## Contents
-
-1. [Repository layout](#repository-layout)
-2. [What you need to build](#what-you-need-to-build)
-3. [Where your code goes](#where-your-code-goes)
-4. [Quickstart](#quickstart)
-5. [Evaluation](#evaluation)
-6. [Chat transcript logging](#chat-transcript-logging)
-7. [Submission](#submission)
-8. [Judge interview](#judge-interview)
+The entire workflow is orchestrated using **LangGraph**, executing independent agents in parallel where possible, and securely aggregating their outputs.
 
 ---
 
-## Repository layout
+## 2. Orchestration & Data Flow (`main.py`)
 
-```text
-.
-├── AGENTS.md                         # Rules for AI coding tools + transcript logging
-├── problem_statement.md              # Full task description and I/O schema
-├── README.md                         # You are here
-├── code/                             # Build your solution here
-│   ├── main.py                       # Suggested terminal entry point
-│   └── evaluation/
-│       └── main.py                   # Suggested evaluation entry point
-└── dataset/
-    ├── sample_claims.csv             # Inputs + expected outputs for development
-    ├── claims.csv                    # Inputs only; run your system on these rows
-    ├── user_history.csv              # Historical claim counts and risk context
-    ├── evidence_requirements.csv     # Minimum image evidence requirements
-    └── images/
-        ├── sample/                   # Images referenced by sample_claims.csv
-        └── test/                     # Images referenced by claims.csv
+The pipeline runs on `LangGraph`, which defines a state machine (`StateGraph`) passing around an `AgentState` dictionary containing various packets (e.g., `claim_packet`, `image_packet`, etc.).
+
+### Graph Topology
+```mermaid
+graph TD
+    A[START: Base Inputs] --> B(Claim Extractor Node)
+    B --> C(Image Analyzer Node)
+    C --> D(Identity Checker Node)
+    D --> E(History Analyzer Node)
+    E --> F(Retrieval Memory Node)
+    F --> G(Evidence Checker Node)
+    G --> H(Verdict Engine Node)
+    H --> I[END: Final Output]
 ```
 
----
-
-## What you need to build
-
-A system that, for each row in `dataset/claims.csv`, produces one row in `output.csv`.
-
-Input fields:
-
-| Column | Meaning |
-|---|---|
-| `user_id` | User submitting the claim; use this to look up `dataset/user_history.csv` |
-| `image_paths` | One or more submitted image paths, separated by semicolons |
-| `user_claim` | Chat transcript describing the issue |
-| `claim_object` | `car`, `laptop`, or `package` |
-
-Required output fields:
-
-| Column | Meaning |
-|---|---|
-| `evidence_standard_met` | Whether the image set is sufficient to evaluate the claim |
-| `evidence_standard_met_reason` | Short reason for the evidence decision |
-| `risk_flags` | Semicolon-separated risk flags, or `none` |
-| `issue_type` | Visible issue type |
-| `object_part` | Relevant object part |
-| `claim_status` | `supported`, `contradicted`, or `not_enough_information` |
-| `claim_status_justification` | Concise explanation grounded in the image evidence |
-| `supporting_image_ids` | Image IDs supporting the decision, or `none` |
-| `valid_image` | Whether the image set is usable for automated review |
-| `severity` | `none`, `low`, `medium`, `high`, or `unknown` |
-
-Hard requirements:
-
-- Must read the provided CSV files and local images.
-- Must produce `output.csv` with the exact schema in `problem_statement.md`.
-- Must include an evaluation workflow
-- Must avoid hardcoded test labels or file-specific answers.
-
-Beyond that you are free to bring your own approach: VLMs, LLMs, structured prompting, rule layers, batching, caching, evaluation pipelines, model comparison, or anything else.
+### Execution Strategy
+1. **State Management**: `main.py` initializes the state with base inputs (`user_id`, `image_paths`, `user_claim`, `claim_object`).
+2. **Parallel/Sequential Flow**: The nodes are chained sequentially in the graph, though internal operations (like processing multiple images) are parallelized.
+3. **Consistency Enforcer**: `main.py` enforces a final Python-level sanity check: *If the verdict engine rules the claim as 'supported', the evidence standard met boolean is hardcoded to True to prevent paradoxical outputs.*
+4. **Data Output**: Writes exactly the 14 columns required by the benchmark to `output.csv`.
 
 ---
 
-## Where your code goes
+## 3. The Agents & Modules
 
-All of your work belongs in [`code/`](./code/). The repo ships with empty starter files that you can grow into your full solution.
+### 3.1. Agent 1: Claim Extractor (`claim_extractor.py`)
+- **Role**: Parses the raw user chat transcript into a structured format.
+- **Technology**: Uses `google/gemma-4-31b-it:free` via OpenRouter.
+- **Output Schema (Pydantic)**: `ClaimOutput`
+  - `extracted_claim_summary`: 1-2 sentence concise summary.
+  - `issue_type`: Mapped to a strict enum (e.g., dent, scratch, missing_part).
+  - `object_part`: Mapped to a strict enum depending on the object (e.g., screen, bumper, package_corner).
+- **Failure Handling**: Wrapped in a `@retry` decorator via `tenacity`. If the LLM hallucinates keys, Pydantic raises a `ValidationError` which automatically triggers a retry.
 
-Suggested conventions:
+### 3.2. Agent 2: Image Analyzer (`image_analyzer.py`)
+- **Role**: The "Eyes" of the system. Analyzes base64-encoded images.
+- **Parallelism**: Uses `concurrent.futures.ThreadPoolExecutor` to process multiple images in parallel (up to 10 workers).
+- **Prompt Discipline**: Strictly instructed to list *only* observable facts, avoiding hallucinating intent. Minor packaging folds are explicitly instructed not to be flagged as tears.
+- **Output Schema (Pydantic)**: `ImageObservation`
+  - `object_class`, `vehicle_color_or_features`, `text_detected`.
+  - `parts_visible`: List of visible parts.
+  - `damage_detected`: List of `DamageObservation` objects containing the `part`, `type`, `severity` (low/medium/high), `confidence`, and `bounding_box`.
+  - `quality_flags`: Identifies blurry or unusable images.
 
-- Put your main runnable solution in `code/main.py`, or document your own entry point clearly.
-- Put evaluation code under `code/evaluation/` or an `evaluation/` folder included in your final `code.zip`.
-- Write final predictions to `output.csv`.
+### 3.3. Identity Checker (`identity_checker.py`)
+- **Role**: Cross-references multiple images within the same claim to ensure they belong to the same object.
+- **Logic**: For claims with $>1$ image, it compares the `vehicle_color_or_features`, `object_class`, and `text_detected` across the outputs of Agent 2. 
+- **Output Schema**: `IdentityOutput` (`same_vehicle` boolean, `identity_flags`).
+
+### 3.4. Agent 3: History Analyzer (`history_analyzer.py`)
+- **Role**: Evaluates the user's past behavior.
+- **Implementation**: Pure Python/Pandas logic. *No LLM is used here to guarantee determinism.*
+- **Logic**: 
+  - Computes the `rejection_rate` (rejected claims / total claims).
+  - Checks if `last_90_days_claim_count` > 3 (high frequency).
+  - Calculates a risk score: `(rejection_rate * 0.6) + (0.4 if high_frequency)`.
+  - Flags users for manual review if risk is high.
+
+### 3.5. Retrieval Memory (`retrieval_memory.py`)
+- **Role**: Detects reused fraud photos from past claims.
+- **Implementation**: Uses `imagehash` (Perceptual Hashing or pHash) and `PIL`.
+- **Logic**: 
+  1. Computes the pHash of each incoming image.
+  2. Compares the hash against a local `memory_db.json`.
+  3. If the Hamming distance is $\le 3$, it flags the image as a duplicate/reused photo (`duplicate_found = True`).
+  4. Saves the new hash to memory to protect against future fraud.
+
+### 3.6. Agent 4: Evidence Checker (`evidence_checker.py`)
+- **Role**: Validates whether the semantic visual evidence matches the claim and meets the minimum requirement string from `evidence_requirements.csv`.
+- **Logic**: Passes the structured extracted claim (Agent 1) and structured image observations (Agent 2) to the LLM. 
+- **Output Schema (Pydantic)**: `EvidenceOutput`
+  - `object_visible`, `part_visible`, `damage_visible` (Booleans).
+  - `object_mismatch` (Catches wrong object claims like a soda can instead of a box).
+  - `evidence_standard_met` (Evaluates against the natural language standard).
+
+### 3.7. Agent 5: Verdict Engine (`verdict_engine.py`)
+- **Role**: The core deterministic authority of the application. It takes all the flags generated by the previous nodes and applies a strict Python `if/elif/else` hierarchy to determine the final claim status. 
+- **The LLM's ONLY job here** is to write the `claim_status_justification` text based on the decision *already made* by Python.
+
+#### The Fall-Through Gate Hierarchy
+1. **Identity Mismatch Gate**: If `same_vehicle` is False OR `object_mismatch` is True, instantly return `contradicted` with high confidence.
+2. **Adversarial Text Gate**: Scans `text_detected` from Agent 2. If strings like "approve this claim" or "tamper evident" appear, instantly return `contradicted` and flag `text_instruction_present`.
+3. **Object Visibility Gate**: If the base object isn't visible, return `not_enough_information`.
+4. **Part Visibility Gate**: If the claimed part isn't visible (and it isn't a missing part claim), return `not_enough_information`.
+5. **Damage Gate**: 
+    - If damage is visible: Check the highest confidence score from Agent 2. If confidence $< 0.5$, return `not_enough_information`. Otherwise, return `supported`.
+    - If damage is NOT visible: If it's a `missing_part` claim, return `not_enough_information`. If the object and part are clearly visible but no damage is seen, return `contradicted`. Otherwise, return `not_enough_information`.
+
+#### Risk Flag Aggregation
+The engine gathers flags from History Analyzer, Image quality flags, and Retrieval Memory. If Retrieval Memory found a duplicate, the system automatically appends the `reused_photo` flag and forces the status to `contradicted`.
 
 ---
 
-## Quickstart
+## 4. Key Engineering Best Practices
 
-Clone this repository:
-
-```bash
-git clone git@github.com:interviewstreet/hackerrank-orchestrate-june26.git
-cd hackerrank-orchestrate-june26
-```
-
-You are free to use any language or runtime. Python, JavaScript, and TypeScript are all reasonable choices.
-
----
-
-## Evaluation
-
-The evaluation report should include:
-
-- metrics on `dataset/sample_claims.csv`
-- at least two strategies, prompts, or model configurations compared
-- the final strategy used for `output.csv`
-- operational analysis covering model calls, token usage, image usage, approximate cost, runtime, and TPM/RPM considerations
-
----
-
-## Chat transcript logging
-
-This repo ships with an `AGENTS.md` that modern AI coding tools may read. It instructs the tool to append conversation turns to a shared log file:
-
-| Platform | Path |
-|---|---|
-| macOS / Linux | `$HOME/hackerrank_orchestrate/log.txt` |
-| Windows | `%USERPROFILE%\hackerrank_orchestrate\log.txt` |
-
-You will upload this log as your chat transcript at submission time. The chat transcript means your conversation with the AI coding tool you used to build the system. It is not the runtime logs, reasoning trace, or conversation history produced by the claim-verification agent you are building.
-
-If you use multiple AI tools, include the relevant conversation logs from all of them in the same transcript file. Separate each tool's section with a clear divider and label it with the tool name.
-
-Never paste secrets into the chat. If secrets are needed, use environment variables.
-
----
-
-## Submission
-
-Submit the following files as instructed by HackerRank:
-
-1. **Code zip**: zip your runnable solution, README, prompts/configs, and evaluation folder. Exclude virtualenvs, `node_modules`, build artifacts, and unnecessary generated files.
-2. **Predictions CSV**: your final `output.csv` for all rows in `dataset/claims.csv`.
-3. **Chat transcript**: the `log.txt` from the path in [Chat transcript logging](#chat-transcript-logging).
-
-Before submitting, confirm:
-
-- `output.csv` has one row per row in `dataset/claims.csv`.
-- `output.csv` has the exact required columns in the exact required order.
-- Your evaluation files are included in `code.zip`.
-
----
-
-## Judge interview
-
-After submission, the AI Judge may ask about your approach, implementation decisions, model usage, evaluation strategy, and how you used AI while building the solution.
-
-Be prepared to explain your solution in detail.
+1. **Pydantic Validation**: Every LLM extraction maps strictly to a Pydantic `BaseModel` using `model_validate_json`. This prevents schema drift.
+2. **Tenacity Retries**: All API calls are wrapped with `@retry(stop=stop_after_attempt(3), wait=wait_exponential)`. If the LLM outputs malformed JSON or a schema error occurs, it automatically backs off and retries.
+3. **Python Hard-Overrides**: By decoupling decision-making from language generation, the pipeline guarantees that obvious contradictions (like wrong objects or missing evidence) cannot be overridden by an overly-permissive LLM prompt.
+4. **Zero-Hallucination Risk Scoring**: History risks are computed using strict arithmetic on Pandas dataframes, completely eliminating LLM math hallucinations.

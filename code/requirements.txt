@@ -1,0 +1,9 @@
+langgraph
+langchain
+langchain-openai
+pandas
+pydantic
+pillow
+python-dotenv
+imagehash
+tenacity

@@ -1,0 +1,8 @@
+{
+    "Claim Status Accuracy": "100.0%",
+    "Issue Type Accuracy": "100.0%",
+    "Object Part Accuracy": "100.0%",
+    "Schema Compliance": "100.0%",
+    "Allowed Values Compliance": "100.0%",
+    "Total Samples": 20
+}
